@@ -324,3 +324,125 @@ func receive() {
 | 「SSE 斷線怎麼辦？」 | SSE 協議內建自動重連 + `Last-Event-ID`，斷線後自動從上次的位置繼續接收 |
 | 「WebSocket 斷線怎麼辦？」 | 需要自己實作重連邏輯 + Exponential Backoff |
 | 「為什麼不全用 WebSocket？」 | 過度設計（over-engineering）。單向場景用 WebSocket 浪費資源、增加複雜度、更耗電 |
+
+### Q: Repository Pattern 和 Coordinator Pattern 是什麼？
+
+這兩個是 iOS 開發中常見的設計模式，在 System Design 面試的 High-Level Diagram 裡幾乎一定會出現。
+
+#### Repository Pattern — 資料來源的中間人
+
+**一句話**：UI 不需要知道資料來自 API 還是本地 DB，Repository 統一幫你處理。
+
+```
+               ┌──────────────┐
+               │  ViewModel   │   ← 只跟 Repository 拿資料
+               └──────┬───────┘
+                      │
+               ┌──────▼───────┐
+               │  Repository  │   ← 決定要打 API 還是讀 Cache
+               └──┬────────┬──┘
+                  │        │
+          ┌───────▼──┐  ┌──▼──────────┐
+          │API Service│  │ Persistence │
+          │(Alamofire)│  │ (CoreData)  │
+          └──────────┘  └─────────────┘
+```
+
+**解決什麼問題？**
+- 沒有 Repository：ViewController 裡混雜 `URLSession` 呼叫 + CoreData 查詢 + cache 判斷，難以維護
+- 有 Repository：ViewController 只呼叫 `repository.getTweets()`，完全不知道資料來源
+
+**Swift 範例**：
+
+```swift
+protocol TweetRepository {
+    func getTweets() async throws -> [Tweet]
+}
+
+class TweetRepositoryImpl: TweetRepository {
+    let apiService: APIService      // Alamofire 封裝
+    let persistence: TweetStorage   // CoreData / Realm
+
+    func getTweets() async throws -> [Tweet] {
+        // Stale-While-Revalidate 策略
+        let cached = try? await persistence.getCachedTweets()
+        if let cached { /* 先回傳舊資料給 UI */ }
+
+        let fresh = try await apiService.fetchTweets()
+        await persistence.save(fresh)   // 更新本地
+        return fresh
+    }
+}
+```
+
+**面試怎麼說**：
+> 「Repository 作為 API 和 Persistence 的中間層，讓 UI 不需要知道資料來自哪裡。這也方便做 Stale-While-Revalidate——先回傳 cache，背景刷新。測試時可以注入 mock Repository。」
+
+---
+
+#### Coordinator Pattern — 導航邏輯的管理者
+
+**一句話**：把「頁面跳轉邏輯」從 ViewController 抽出來，由 Coordinator 統一管理。
+
+**解決什麼問題？**
+
+沒有 Coordinator 時，ViewController 之間互相 push/present，緊耦合：
+
+```swift
+// ❌ 沒有 Coordinator：VC 知道下一個畫面是誰
+class FeedViewController {
+    func didTapTweet(_ tweet: Tweet) {
+        let detailVC = TweetDetailViewController(tweet: tweet)
+        navigationController?.pushViewController(detailVC, animated: true)
+        // FeedVC 直接依賴 TweetDetailVC → 緊耦合
+    }
+}
+```
+
+有 Coordinator 時，VC 只說「發生了什麼事」，由 Coordinator 決定「去哪裡」：
+
+```swift
+// ✅ 有 Coordinator：VC 不知道下一個畫面是誰
+protocol FeedCoordinatorDelegate: AnyObject {
+    func didSelectTweet(_ tweet: Tweet)
+}
+
+class FeedViewController {
+    weak var coordinator: FeedCoordinatorDelegate?
+
+    func didTapTweet(_ tweet: Tweet) {
+        coordinator?.didSelectTweet(tweet)  // 只通知，不決定去哪
+    }
+}
+
+class FeedCoordinator: FeedCoordinatorDelegate {
+    let navigationController: UINavigationController
+
+    func didSelectTweet(_ tweet: Tweet) {
+        let detailVC = TweetDetailViewController(tweet: tweet)
+        navigationController.pushViewController(detailVC, animated: true)
+    }
+}
+```
+
+**為什麼面試要提？**
+- 展示你理解「模組解耦」
+- 支持 Deep Link（Coordinator 可以直接建構任意頁面的 navigation stack）
+- 方便 A/B Testing（同一個事件，Coordinator 可以導向不同頁面）
+
+**面試怎麼說**：
+> 「導航邏輯由 Coordinator 管理，ViewController 之間不直接引用。這支持 Deep Link——收到 push notification 時，Coordinator 可以直接建構正確的 navigation stack，不需要逐頁跳轉。」
+
+---
+
+#### 學習資源
+
+| 資源 | 類型 | 連結 |
+|---|---|---|
+| **Soroush Khanlou — The Coordinator** | 📝 Blog（Coordinator 原始提出者） | https://khanlou.com/2015/01/the-coordinator/ |
+| **Hacking with Swift — Coordinator Pattern** | 📝 Tutorial（完整教學） | https://www.hackingwithswift.com/articles/71/how-to-use-the-coordinator-pattern-in-ios-apps |
+| **daveneff/Coordinator** | 💻 GitHub（Swift 5，含範例 App） | https://github.com/daveneff/Coordinator |
+| **Alamofire 原始碼** | 💻 GitHub（Repository pattern 的真實範例：`Session` 封裝了 `Request` 的建立和分發） | https://github.com/Alamofire/Alamofire |
+| **Kingfisher 原始碼** | 💻 GitHub（Repository pattern 的變體：`KingfisherManager` 協調 `ImageDownloader` + `ImageCache`） | https://github.com/onevcat/Kingfisher |
+
+**Kingfisher 就是 Repository Pattern 的活教材**：`KingfisherManager` 扮演 Repository 角色——呼叫 `kf.setImage(with: url)` 時，它先查 `ImageCache`（本地），cache miss 再用 `ImageDownloader`（遠端），你完全不用管資料來自哪裡。
