@@ -1,128 +1,170 @@
-# E3 練習：Caching 基礎 — 設計多層快取策略
+# E3 练习：Caching 基础 — 设计多层缓存策略
 
-## 練習目標
+## 练习目标
 
-在 10-15 分鐘內，針對「Design Twitter Feed」說清楚快取分層、快取策略與 HTTP Cache 的設計，並能解釋關鍵 trade-off。
+在 10-15 分钟内，针对「Design Twitter Feed」讲清楚缓存分层、缓存策略与 HTTP Cache 的设计，并能解释关键 Trade-off（权衡取舍）。
 
 ---
 ---
 
-# 📝 Coach 教學
+# 📝 Coach 教学
 
-## 🎯 E3 的核心：Cache 不是只為了快，而是為了「穩定體驗」
+## 🎯 E3 的核心：Cache（缓存）不是只为“快”，而是为了“稳定体验”
 
-很多 iOS 工程師談快取只會說「加速」。
+很多 iOS 工程师谈缓存只会说“加速”。
 
-**面試官真正要聽的是：**
+**面试官真正要听的是：**
 
-1. **離線可用**：網路差時還能看內容
+1. **离线可用**：网络差时还能看内容
 2. **成本控制**：少打 API、少耗流量
-3. **電量優化**：降低無線電喚醒次數
-4. **一致性策略**：何時允許舊資料，何時一定要最新
+3. **电量优化**：降低 `radio wakeups`（蜂窝/`Wi-Fi` 通信模块唤醒次数）
+4. **一致性策略**：何时允许旧数据，何时必须最新
 
-## Cache 三層思維（Mobile 版本）
+## Cache 三层思维（Mobile 版本）
 
-```
+```text
 UI
   ↓
-Repository
+Repository（仓储层）
   ↓
 L1 Memory Cache (NSCache)
-  ↓ miss
+  ↓ miss（未命中）
 L2 Disk Cache (File/CoreData/Realm)
-  ↓ miss or expired
+  ↓ miss（未命中） or expired（过期）
 Network (API + HTTP Cache/ETag)
 ```
 
-## 每層該放什麼（iOS 對照）
+## 每层该放什么（iOS 对照）
 
-| 層級 | 速度 | 持久性 | 放什麼 | iOS 對應 |
+| 层级 | 速度 | 持久性 | 放什么 | iOS 对应 |
 |---|---|---|---|---|
-| **L1 Memory Cache** | 最快 | App kill 後消失 | 熱資料、當前畫面常用圖片 | `NSCache`、Kingfisher memory storage |
-| **L2 Disk Cache** | 中等 | 可跨重啟 | JSON、圖片、列表快照 | `FileManager`、CoreData、Realm、Kingfisher disk storage |
-| **HTTP Cache** | 由協議控制 | 視 header | 可重驗證的 API 回應 | `URLCache` + `Cache-Control`/`ETag` |
+| **L1 Memory Cache** | 最快 | App 被 kill 后消失 | 热数据、当前画面常用图片 | `NSCache`、Kingfisher memory storage |
+| **L2 Disk Cache** | 中等 | 可跨重启 | JSON、图片、列表快照 | `FileManager`、CoreData、Realm、Kingfisher disk storage |
+| **HTTP Cache** | 由协议控制 | 视 header | 可重验证的 API 响应 | `URLCache` + `Cache-Control`/`ETag` |
 
-## 兩個面試最高頻策略
+## 两个面试最高频策略
 
 ### 1) Cache-Aside（旁路缓存）
 
 流程：
 1. 先查 cache
-2. hit 直接回
-3. miss 打 API，寫回 cache，再回 UI
+2. hit（命中）直接返回
+3. miss（未命中）打 API，写回 cache，再返回 UI
 
-**適合**：一致性需求中等、邏輯清楚的一般資料載入。
+**适合**：一致性要求中等、逻辑清晰的一般数据加载。
 
 ### 2) Stale-While-Revalidate（先返回旧数据并后台刷新）
 
+说明：`SWR` 是 `Stale-While-Revalidate` 的缩写。
+
 流程：
-1. 先回舊資料（UI 秒開）
-2. 背景打 API 拿新資料
-3. 有新資料再刷新 UI
+1. 先返回旧数据（UI 秒开）
+2. 后台打 API 拉新数据
+3. 有新数据再刷新 UI
 
-**適合**：Feed、Profile、內容流。
-**不適合**：付款、餘額、庫存等強一致場景。
+**适合**：Feed、Profile、内容流。  
+**不适合**：支付、余额、库存等强一致场景。
 
-## HTTP Cache 三件事（一定要會講）
+## HTTP Cache 三件事（一定要会讲）
 
-| Header | 作用 | 面試一句話 |
+| Header | 作用 | 面试一句话 |
 |---|---|---|
-| `Cache-Control` | 控制可用時間與重驗證規則 | 「決定能不能直接用本地副本」 |
-| `ETag` + `If-None-Match` | 內容指紋比對 | 「沒變就回 304，省流量」 |
-| `Last-Modified` + `If-Modified-Since` | 以時間戳判斷是否更新 | 「時間版條件請求，精度不如 ETag」 |
+| `Cache-Control` | 控制可用时间与重验证规则 | “决定能不能直接用本地副本” |
+| `ETag` + `If-None-Match` | 内容指纹比对 | “没变就回 304，省流量” |
+| `Last-Modified` + `If-Modified-Since` | 以时间戳判断是否更新 | “时间版条件请求，精度不如 ETag” |
 
-## iOS 實戰口條（用你熟悉的庫）
+## iOS 实战口条（用你熟悉的库）
 
-- **Kingfisher**：Memory/Disk 兩層快取 + processor key，對圖片尺寸與解碼成本友好。
-- **Alamofire**：可結合 `URLSessionConfiguration.urlCache`；必要時用 interceptor 控制重試與 revalidate。
-- **Repository**：負責協調資料來源與策略，不直接耦合 UI 元件。
+- **Kingfisher**：Memory/Disk 两层缓存 + processor key（处理器键），对图片尺寸与解码成本友好。
+- **Alamofire**：可结合 `URLSessionConfiguration.urlCache`；必要时用 interceptor（拦截器）控制重试与 revalidate（重新验证）。
+- **Repository**：负责协调数据来源与策略，不直接耦合 UI 组件。
 
-## 關鍵 Trade-off（面試加分）
+## 关键 Trade-off（权衡取舍，面试加分）
 
-| 決策 | 好處 | 代價 |
+| 决策 | 好处 | 代价 |
 |---|---|---|
-| Memory cache 大 | 命中率高、滑動順 | OOM 風險上升 |
-| Disk cache 大 | 離線更完整 | I/O 變慢、清理更複雜 |
-| SWR | 體感快、低等待 | 短暫顯示舊資料 |
-| 強制每次拉新 | 一致性高 | 延遲高、耗流量耗電 |
+| Memory cache 大 | 命中率高、滑动顺 | OOM 风险上升 |
+| Disk cache 大 | 离线更完整 | I/O 变慢、清理更复杂 |
+| Stale-While-Revalidate（SWR） | 体感快、低等待 | 短暂显示旧数据 |
+| 强制每次拉新 | 一致性高 | 延迟高、耗流量耗电 |
 
-## ⚠️ 常見錯誤
+## ⚠️ 常见错误
 
-- ❌ 只說「快」，沒提離線/成本/電量
-- ❌ 把所有資料都塞進 Memory（忽略 OOM）
-- ❌ 沒有 invalidation 規則（登出、下拉刷新、版本升級）
-- ❌ 不了解 `304 Not Modified` 的意義
-- ❌ 在強一致場景也套用 SWR
+- ❌ 只说“快”，没提离线/成本/电量
+- ❌ 把所有数据都塞进 Memory（忽略 OOM）
+- ❌ 没有 invalidation（失效）规则（登出、下拉刷新、版本升级）
+- ❌ 不了解 `304 Not Modified` 的意义
+- ❌ 在强一致场景也套用 Stale-While-Revalidate（SWR）
 
 ## ❓ E3 Q&A
 
-### Q1: 既然有 ETag，還需要 App 端 Disk Cache 嗎？
+### Q1: 既然有 ETag，还需要 App 端 Disk Cache 吗？
 
-需要。ETag 只能幫你「省下載量」，但每次仍可能要發請求等待 RTT。  
-Disk Cache 能在離線或弱網時立即回應，兩者是互補，不是替代。
+需要。ETag 只能帮你“省下载量”，但每次仍可能要发请求等待 RTT。  
+Disk Cache 能在离线或弱网时立即响应，两者是互补关系，不是替代关系。
 
-### Q2: 登出時要清哪些 cache？
+### Q2: 登出时要清哪些 cache？
 
-- 必清：與使用者身份綁定的資料（個人資料、私訊、token 關聯快取）
-- 可保留：公開、匿名可見且不敏感的資源（例如通用圖片）
-- 原則：安全優先，其次再談命中率
+- 必清：与用户身份绑定的数据（个人资料、私信、token 关联缓存）
+- 可保留：公开、匿名可见且不敏感的资源（例如通用图片）
+- 原则：安全优先，其次再谈命中率
 
-### Q3: 為什麼 Feed 常用 SWR？
+### Q3: 为什么 Feed 常用 Stale-While-Revalidate（SWR）？
 
-因為 Feed 對「立即可看」的要求通常高於「毫秒級最新」。  
-先回快取再背景刷新，能把首屏等待降到最低。
+因为 Feed 对“立刻可看”的要求通常高于“毫秒级最新”。  
+先返回缓存再后台刷新，能把首屏等待降到最低。
 
 ---
 ---
 
-## ✍️ 你的練習
+## ✍️ 你的练习
 
-**題目**：Design Twitter Feed 的快取策略
+**题目**：Design Twitter Feed 的缓存策略
 
 **要求**：
-1. 畫出 L1/L2/Network 的讀取路徑（hit/miss）
-2. 說明哪個場景用 Cache-Aside，哪個場景用 SWR
-3. 解釋 `Cache-Control`、`ETag`、`Last-Modified` 各做什麼
-4. 說出 2 個 invalidation 觸發條件（例如：logout、pull-to-refresh）
+1. 画出 L1/L2/Network 的读取路径（hit/miss）
+2. 说明哪个场景用 Cache-Aside，哪个场景用 Stale-While-Revalidate（SWR）
+3. 解释 `Cache-Control`、`ETag`、`Last-Modified` 各做什么
+4. 说出 2 个 invalidation（失效）触发条件（例如：logout、pull-to-refresh）
 
-你可以先用 5 分鐘寫草稿，我再幫你做面試版 review。
+你可以先用 5 分钟写草稿，我再帮你做面试版 review。
+
+## ✅ 参考答案（缓存策略）
+
+### 1) L1/L2/Network 读取路径（hit/miss）
+
+```text
+读取 Feed：
+UI -> Repository -> L1 Memory Cache
+  -> hit（命中）: 直接返回
+  -> miss（未命中）: 查 L2 Disk Cache
+      -> hit（命中）: 返回 UI，并回填 L1
+      -> miss（未命中）或 expired（过期）: 请求 Network(API)
+          -> 200: 写入 L2 + 回填 L1 + 返回 UI
+          -> 304: 使用本地 L2 数据 + 回填 L1 + 返回 UI
+```
+
+### 2) 场景选择：Cache-Aside vs Stale-While-Revalidate（SWR）
+
+- Feed 首页：用 `Stale-While-Revalidate（SWR）`  
+  先展示旧数据，后台拉新，刷新体验更平滑。
+- 余额/支付/库存：用 `Cache-Aside（旁路缓存）` 或直接网络优先  
+  以一致性优先，避免旧数据导致业务错误。
+
+### 3) `Cache-Control`、`ETag`、`Last-Modified` 各自作用
+
+- `Cache-Control`：定义缓存策略（如 `max-age`、`no-cache`、`no-store`）。
+- `ETag`：资源指纹；客户端带 `If-None-Match` 发条件请求，未变化返回 `304 Not Modified`。
+- `Last-Modified`：资源最后修改时间；客户端带 `If-Modified-Since` 做时间型重验证。
+
+### 4) 失效触发条件（invalidation）
+
+- `logout（登出）`：清理用户私有缓存（资料、私信、token 相关数据）。
+- `pull-to-refresh（下拉刷新）`：主动触发重验证或强制拉新。
+- `app version upgrade（版本升级）`：按版本号清理不兼容缓存结构。
+
+### 面试 30 秒总结口条
+
+我会做 L1 `Memory Cache` + L2 `Disk Cache` 的分层读取，优先命中本地，未命中再请求网络。  
+Feed 用 `Stale-While-Revalidate（SWR）` 提升体感速度，强一致场景用 `Cache-Aside` 或网络优先。  
+HTTP 层用 `Cache-Control`、`ETag`、`Last-Modified` 控制缓存与重验证，并通过登出、下拉刷新、版本升级触发失效。
