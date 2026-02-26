@@ -65,13 +65,10 @@ Network (API + HTTP Cache/ETag)
 **适合**：Feed、Profile、内容流。  
 **不适合**：支付、余额、库存等强一致场景。
 
-## HTTP Cache 三件事（一定要会讲）
+## HTTP 协议内容已拆分（请配套阅读）
 
-| Header | 作用 | 面试一句话 |
-|---|---|---|
-| `Cache-Control` | 控制可用时间与重验证规则 | “决定能不能直接用本地副本” |
-| `ETag` + `If-None-Match` | 内容指纹比对 | “没变就回 304，省流量” |
-| `Last-Modified` + `If-Modified-Since` | 以时间戳判断是否更新 | “时间版条件请求，精度不如 ETag” |
+为了让这份 E3 主文档聚焦“缓存分层与策略决策”，HTTP 协议细节（`Cache-Control`、`ETag`、`304`、`Range Request`、`URLCache` 安全策略）已移动到：  
+[E3-http-caching-protocol.md](/Users/sunset/Documents/Projects/mobile-system-design/case-study/design-twitter-feed/E3-http-caching-protocol.md)
 
 ## iOS 实战口条（用你熟悉的库）
 
@@ -170,7 +167,81 @@ Disk Cache 能在离线或弱网时立即响应，两者是互补关系，不是
 
 - `Cache-Aside（旁路缓存）` 适合一致性要求中等的场景：允许短时间旧数据，重点是降低延迟与减少后端压力。
 - 对于高一致场景（如余额、支付、库存），默认应采用 `Network-First（网络优先）`，UI 展示 loading/skeleton 后请求网络。
+- 回写缓存（write cache back）指的是：网络成功返回最新数据后，再把该结果写回缓存；缓存是副本，不是权威数据源。
 - 在高一致场景中，`Cache-Aside` 更适合作为回写缓存或失败兜底（`stale-if-error`），而不是默认读路径。
+- 这不矛盾：  
+  正常路径是 `Network-First`（先网络，保证一致性）；  
+  异常路径（超时/断网）才短暂展示旧数据，属于降级兜底，不是主策略。
+- 强事务动作（支付确认、扣款、库存确认）通常不应展示旧数据，失败应明确报错并要求重试。
+
+### Q7: 什么是“数据一致性（Data Consistency，一致性）”？
+
+数据一致性指的是：同一份业务数据，在不同副本、不同时间、不同端读取时，是否满足你定义的“正确性规则”。
+
+可以用 3 个判断问题快速定义一致性要求：
+
+- 我现在读到的是不是最新值？
+- 不同页面/设备看到的值会不会互相矛盾？
+- 写入顺序会不会被打乱（比如后写被前写覆盖）？
+
+常见一致性等级：
+
+- `Strong Consistency（强一致）`：读取必须是最新提交值。  
+  典型场景：余额、支付状态、库存确认。
+- `Eventual Consistency（最终一致）`：短时间可能是旧值，但最终会收敛。  
+  典型场景：Feed、点赞数、评论数。
+- `Session Consistency（会话一致）`：至少保证“我刚写入的数据，我自己马上能读到”（Read-your-writes）。  
+  常用于提升用户体感正确性。
+
+与缓存策略的映射：
+
+- 高一致：默认 `Network-First（网络优先）`。
+- 中等一致：常用 `Cache-Aside（旁路缓存）`。
+- 低一致/内容流：常用 `Stale-While-Revalidate（SWR）`。
+
+一句话记忆：一致性不是“要不要缓存”，而是“允许多旧、允许多久、错误代价多大”。
+
+### Q8: Session Consistency（会话一致）在这道系统设计题中有体现的地方吗？
+
+有，且在 `Design Twitter Feed` 里很常见。  
+`Session Consistency（会话一致）` 关注的是：我自己刚写入的数据，我自己要立刻读到（Read-your-writes）。
+
+典型体现点：
+
+- 发帖后自己立刻看到：先在本地 Feed 插入新 tweet（optimistic update，乐观更新），再异步与服务端对齐。
+- 点赞后自己立刻看到：当前会话先显示已点赞与计数变化，其他用户可稍后再收敛。
+- 删除后自己立刻看不到：先本地隐藏/标记删除，再同步服务端，失败时回滚。
+
+一句话区分：`Session Consistency` 保证“我看到我刚写的”，不保证“所有人同时看到同一值”。
+
+### Q9: 为什么常说“先更新 L2 再更新 L1”？这个顺序有什么考量？
+
+先澄清：这不是“所有场景都固定如此”。
+
+- 在**网络回源写入**场景中，常见做法是先写 `L2 Disk Cache`，再回填 `L1 Memory Cache`。  
+  主要是为了：  
+  1) 持久性优先（先落盘，重启后还在）；  
+  2) 降低分层不一致风险（避免 L1 新、L2 旧）；  
+  3) 失败处理更可控（L2 失败时可选择不提升到 L1）。
+- 在**L2 命中读取**场景中，流程通常是：  
+  先读取/校验 L2（必要时更新 L2 的过期元数据），再回填 L1 提升后续命中率。
+- 如果业务极端追求首帧速度，也可先回填 L1、再异步写 L2，但要接受一致性与故障处理复杂度上升。
+
+源码参考（Kingfisher）：
+
+- `Reference/Kingfisher-master/Sources/Cache/ImageCache.swift:625-649`  
+  内存 miss 后查磁盘，磁盘命中后执行 `store(..., toDisk: false)` 回填内存。
+- `Reference/Kingfisher-master/Sources/Cache/ImageCache.swift:636-646`  
+  注释明确“Cache the disk image to memory”。
+- `Reference/Kingfisher-master/Sources/Cache/DiskStorage.swift:273-275`  
+  磁盘读取时先判定是否过期，过期即 miss。
+- `Reference/Kingfisher-master/Sources/Cache/DiskStorage.swift:282-283`  
+  磁盘命中后会更新过期元数据（extend expiration）。
+
+### Q10: HTTP 相关 Q&A 去哪看？
+
+本阶段所有 HTTP 协议问答（`ETag/304` 流程、`URLSession` 自动控制、头像 URL 策略、`URLCache` 安全性、`Range Request`）已整理到：  
+[E3-http-caching-protocol.md](/Users/sunset/Documents/Projects/mobile-system-design/case-study/design-twitter-feed/E3-http-caching-protocol.md)
 
 ---
 ---
@@ -182,7 +253,7 @@ Disk Cache 能在离线或弱网时立即响应，两者是互补关系，不是
 **要求**：
 1. 画出 L1/L2/Network 的读取路径（hit/miss）
 2. 说明哪个场景用 Cache-Aside，哪个场景用 Stale-While-Revalidate（SWR）
-3. 解释 `Cache-Control`、`ETag`、`Last-Modified` 各做什么
+3. 解释 `Cache-Control`、`ETag`、`Last-Modified` 各做什么（详见 `E3-http-caching-protocol.md`）
 4. 说出 2 个 invalidation（失效）触发条件（例如：logout、pull-to-refresh）
 
 你可以先用 5 分钟写草稿，我再帮你做面试版 review。
@@ -214,9 +285,8 @@ UI -> Repository -> L1 Memory Cache
 
 ### 3) `Cache-Control`、`ETag`、`Last-Modified` 各自作用
 
-- `Cache-Control`：定义缓存策略（如 `max-age`、`no-cache`、`no-store`）。
-- `ETag`：资源指纹；客户端带 `If-None-Match` 发条件请求，未变化返回 `304 Not Modified`。
-- `Last-Modified`：资源最后修改时间；客户端带 `If-Modified-Since` 做时间型重验证。
+- 请直接复述 [E3-http-caching-protocol.md](/Users/sunset/Documents/Projects/mobile-system-design/case-study/design-twitter-feed/E3-http-caching-protocol.md) 的「HTTP Cache 三件事」与「ETag 最小工作流」两段。
+- 面试最短口条：`Cache-Control` 决定缓存规则，`ETag/If-None-Match` 与 `Last-Modified/If-Modified-Since` 决定重验证。
 
 ### 4) 失效触发条件（invalidation）
 
