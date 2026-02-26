@@ -41,6 +41,8 @@
 | `private` | 仅终端私有缓存可存 | 与用户身份强相关数据 |
 | `must-revalidate` | 过期后必须重验证 | 一致性要求较高的读取接口 |
 
+注：上表是面试常见“响应头视角”的速查。你贴的 RFC `5.2.1.4 / 5.2.1.5` 属于“请求指令视角”，细节见后面的 Q7。
+
 ## `ETag` 最小工作流
 
 ```http
@@ -95,6 +97,10 @@ If-None-Match: "avatar_v17"
 - 不必须用 `Alamofire`。
 - `URLSession + URLCache` 就能自动处理大量 HTTP 缓存行为。
 - `Alamofire` 价值在工程化扩展，不是 HTTP 缓存“唯一入口”。
+- `URLSession` 能遵循 HTTP 缓存语义处理 `ETag/304`，但要满足前提：
+  - `requestCachePolicy` 允许协议缓存（通常 `.useProtocolCachePolicy`）
+  - 会话有可用的 `urlCache`
+  - 服务端返回正确缓存头（`Cache-Control` / `ETag` / `Last-Modified`）
 
 ### Q3: 用户头像适合用 `ETag` 吗？URL 固定还是变化？
 
@@ -135,38 +141,69 @@ let secureSession = Session(configuration: secureConfig)
 3. 对敏感请求可用 `.reloadIgnoringLocalCacheData`。
 4. 在 `urlSession(_:dataTask:willCacheResponse:completionHandler:)` 返回 `nil`，阻止特定响应进入缓存。
 
-Alamofire 示例（会话级 + 请求级双保险）：
+先回答你问的重点：何时用 `Session Level（会话级）`，何时用 `request/task Level（请求或任务级）`？
+
+- 用 `Session Level`：当一整类接口长期共享同一安全策略（如 `payment（支付）`、`profile（个人资料）`、`public content（公共内容）`）。
+- 用 `request/task Level`：当只有少数请求需要“临时例外策略”（如某个请求要强制绕过缓存、某个下载是 Range 请求）。
+- 实务建议：默认策略放在 Session，例外放在 request/task，避免每个请求都手写安全参数。
+
+Trade-off（权衡取舍）：
+
+| 维度 | Session Level（会话级） | request/task Level（请求或任务级） |
+|---|---|---|
+| 一致性（Consistency，一致性） | 高：同类请求默认同一策略 | 中：容易漏配，依赖调用方自觉 |
+| 灵活性（Flexibility，灵活性） | 中：改动影响整类请求 | 高：可按单请求微调 |
+| 维护成本（Maintenance，维护成本） | 低到中：集中配置，长期省心 | 中到高：分散在调用点，易重复 |
+| 误用风险（Misconfiguration Risk，错配风险） | 低：策略被“框死” | 高：某次忘记设置就可能泄漏 |
+| 资源开销（Resource Overhead，资源开销） | 多 Session 会增加管理复杂度 | 不增 Session，但逻辑分散 |
+
+Alamofire 示例 A（Session Level：按安全级别建 Session，一次配置，多处复用）：
 
 ```swift
 import Alamofire
 
-let config = URLSessionConfiguration.ephemeral
-config.urlCache = nil
-config.requestCachePolicy = .reloadIgnoringLocalCacheData
+let publicSession = Session.default
 
-let secureSession = Session(
-    configuration: config,
-    cachedResponseHandler: ResponseCacher.doNotCache // 等价于 willCacheResponse -> nil
+let privateConfig = URLSessionConfiguration.default
+privateConfig.urlCache = nil
+privateConfig.requestCachePolicy = .reloadIgnoringLocalCacheData
+let privateSession = Session(
+    configuration: privateConfig,
+    cachedResponseHandler: ResponseCacher.doNotCache
 )
+
+let transactionConfig = URLSessionConfiguration.ephemeral
+transactionConfig.urlCache = nil
+transactionConfig.requestCachePolicy = .reloadIgnoringLocalCacheData
+let transactionSession = Session(
+    configuration: transactionConfig,
+    cachedResponseHandler: ResponseCacher.doNotCache
+)
+```
+
+Alamofire 示例 B（request/task Level：只对单个请求临时加严）：
+
+```swift
+import Alamofire
 
 let headers: HTTPHeaders = [
     "Authorization": "Bearer <token>",
     "Cache-Control": "no-store"
 ]
 
-secureSession
+publicSession
     .request(
         "https://api.example.com/me",
         headers: headers,
-        requestModifier: { urlRequest in
-            urlRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        requestModifier: { request in
+            // 覆盖会话默认 cachePolicy（仅此请求）
+            request.cachePolicy = .reloadIgnoringLocalCacheData
         }
     )
-    .cacheResponse(using: ResponseCacher.doNotCache) // 仅该请求禁缓存
+    // 仅此任务禁缓存（task level）
+    .cacheResponse(using: ResponseCacher.doNotCache)
     .validate()
-    .responseDecodable(of: ProfileDTO.self) { response in
-        // handle response
-    }
+    .responseDecodable(of: ProfileDTO.self) { _ in }
 ```
 
 ### Q6: 什么是 `HTTP Range Request（字节范围请求）`？为什么常建议配合 `.reloadIgnoringLocalCacheData`？
@@ -208,6 +245,166 @@ Session.default
     }
 ```
 
+### Q7: RFC 里 `no-cache` 与 `no-store`（请求指令）到底差在哪？
+
+你引用的是 **request directive（请求指令）**，重点如下：
+
+1. `Cache-Control: no-cache`（请求）  
+   含义：客户端要求“缓存副本在使用前必须先向源站验证”。  
+   关键点：**可以存**，但不能未经验证直接拿来回包。
+2. `Cache-Control: no-store`（请求）  
+   含义：缓存不应存储该请求及其响应（私有/共享缓存都适用）。  
+   关键点：规范说的是“`MUST NOT intentionally store` + 尽力尽快清除易失存储”，并非数学意义的 100% 保证。
+3. 为什么 RFC 说它“不是可靠或充分的隐私机制”  
+   因为恶意/受损缓存可能不遵守，且链路层仍可能被窃听。  
+   所以隐私安全仍要依赖 HTTPS、鉴权、最小化敏感数据落盘等整体设计。
+4. “如果请求已从缓存命中，`no-store` 不追溯生效”是什么意思  
+   如果某个响应在过去已经被存进缓存，这次请求即便带 `no-store`，也不会自动抹掉那份“既有缓存副本”。
+
+Alamofire 示例（请求指令 + 客户端侧强化控制）：
+
+```swift
+import Alamofire
+
+// A) no-cache: 可缓存，但使用前必须重验证
+AF.request(
+    "https://api.example.com/feed",
+    headers: ["Cache-Control": "no-cache"]
+)
+
+// B) no-store: 请求端表达“不应存储”
+//    同时在客户端再加两层保险：忽略本地缓存 + 禁止写回缓存
+AF.request(
+    "https://api.example.com/payment/confirm",
+    headers: ["Cache-Control": "no-store"],
+    requestModifier: { $0.cachePolicy = .reloadIgnoringLocalCacheData }
+)
+.cacheResponse(using: ResponseCacher.doNotCache)
+```
+
+面试一句话：`no-cache` 是“先验证再用”，`no-store` 是“不要存”，但隐私安全不能只靠 `no-store`。
+
+### Q8: 在业务代码里，如何观察 `URLSession` 是否缓存命中？
+
+首选方法：看 `URLSessionTaskMetrics` 的 `resourceFetchType`。
+
+- `.localCache`：本地缓存命中
+- `.networkLoad`：走网络
+- `.serverPush` / `.unknown`：其他情况
+
+`URLSession` 示例（推荐）：
+
+```swift
+import Foundation
+
+final class MetricsDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession,
+                    task: URLSessionTask,
+                    didFinishCollecting metrics: URLSessionTaskMetrics) {
+        guard let tx = metrics.transactionMetrics.last else { return }
+        switch tx.resourceFetchType {
+        case .localCache:
+            print("cache hit, task=\(task.taskIdentifier)")
+        case .networkLoad:
+            print("network load, task=\(task.taskIdentifier)")
+        case .serverPush:
+            print("server push, task=\(task.taskIdentifier)")
+        default:
+            print("unknown fetch type, task=\(task.taskIdentifier)")
+        }
+    }
+}
+```
+
+Alamofire 示例（用 `EventMonitor` 读取同一套 metrics）：
+
+```swift
+import Alamofire
+
+final class CacheHitMonitor: EventMonitor {
+    let queue = DispatchQueue(label: "cache-hit-monitor")
+
+    func request(_ request: Request, didGatherMetrics metrics: URLSessionTaskMetrics) {
+        guard let tx = metrics.transactionMetrics.last else { return }
+        switch tx.resourceFetchType {
+        case .localCache:
+            print("[AF] cache hit: \(request.id)")
+        case .networkLoad:
+            print("[AF] network: \(request.id)")
+        default:
+            print("[AF] other: \(request.id)")
+        }
+    }
+}
+
+let session = Session(eventMonitors: [CacheHitMonitor()])
+```
+
+补充：`URLCache.cachedResponse(for:)` 只能看“当前缓存里有没有副本”，不等价于“这次请求是否命中缓存”；做埋点请以 `TaskMetrics` 为准。
+
+### Q9: “`Cache-Control: no-cache` 使用前必须重验证”到底是什么意思？为什么我平时几乎不手动设置？
+
+先区分协议里的两个方向：
+
+- **请求头** `Cache-Control: no-cache`：客户端表达“这次请求不要直接用缓存副本，先去源站验证”。
+- **响应头** `Cache-Control: ...`：服务端告诉客户端/中间缓存“这个响应可以怎么缓存、缓存多久、何时必须重验证”。
+
+“使用前必须重验证”的 HTTP 流程：
+
+1. 本地缓存里可能已有旧副本。
+2. 这次不能直接返回旧副本，需先发条件请求（常见带 `If-None-Match` / `If-Modified-Since`）。
+3. 源站返回：
+   - `304 Not Modified`：继续使用本地副本；
+   - `200 OK + new body`：用新响应覆盖旧缓存。
+
+为什么你日常几乎不手动设请求 `no-cache` 也正常：
+
+- 多数客户端使用 `.useProtocolCachePolicy` 默认策略。
+- 缓存行为主要由**服务端响应头**（`Cache-Control` / `ETag` / `Last-Modified`）驱动。
+- 所以“不手动加请求 `Cache-Control`”不代表“没用 HTTP 缓存”。
+
+这是否说明服务端没用“HTTP 缓存服务器”？
+
+- 不是。HTTP 缓存是协议语义，可发生在客户端 `URLCache`、代理、CDN 等多层。
+- 有无 CDN/反向代理是部署架构问题，不是 HTTP 缓存是否生效的前提。
+- 即使没有 CDN，只要服务端响应头正确，`URLSession + URLCache` 一样能缓存与重验证。
+
+Alamofire 示例（仅在“这次必须先验证”时显式加 `no-cache`）：
+
+```swift
+import Alamofire
+
+AF.request(
+    "https://api.example.com/feed",
+    headers: ["Cache-Control": "no-cache"]
+).responseData { _ in }
+```
+
+面试一句话：请求 `no-cache` 是“这次先验证再用缓存”；日常主要靠服务端响应头驱动缓存，不必每个请求手动加。
+
+### Q10: HTTP 已经有很多缓存机制了，为什么 Kingfisher（KF）这类业务层缓存还有必要？
+
+有必要。两者是互补关系，不是替代关系。
+
+核心区别：
+
+1. HTTP 缓存（协议层）解决“**字节响应**是否可复用”。
+2. KF 缓存（业务/图片层）解决“**图片对象与显示成本**如何复用”。
+
+为什么仅靠 HTTP 缓存不够：
+
+- UI 使用的是已解码图片对象（`UIImage`），HTTP 缓存主要存的是响应数据；重复解码仍有 CPU 成本。
+- 同一 URL 经过不同处理（圆角、缩略图、下采样）是不同展示结果，KF 可按 `processor key（处理器键）` 区分缓存。
+- 业务通常需要更细粒度策略：内存上限、磁盘上限、按场景清理、内存告警清空、预取与回填。
+- 有些资源来源不只 HTTP（本地文件、自定义数据源），业务层缓存可统一策略。
+- 列表滚动场景中，业务层缓存命中可减少主线程抖动，优化首屏和滑动体验。
+
+推荐实践（面试可直接说）：
+
+- 协议层：用 `HTTP Cache（HTTP 缓存）` 做网络字节级复用与重验证（`ETag/304`）。
+- 业务层：用 KF 的 `Memory + Disk` 做图片对象级复用与展示性能优化。
+- 结论：`HTTP Cache` 负责“省网路与正确性”，`KF Cache` 负责“省解码与体验稳定性”。
+
 ## 学习资源（补课清单）
 
 ### Apple 官方
@@ -218,6 +415,7 @@ Session.default
 - [URLSessionConfiguration.requestCachePolicy](https://developer.apple.com/documentation/foundation/urlsessionconfiguration/requestcachepolicy)
 - [NSURLRequest.CachePolicy.reloadIgnoringLocalCacheData](https://developer.apple.com/documentation/foundation/nsurlrequest/cachepolicy-swift.enum/reloadignoringlocalcachedata)
 - [urlSession(_:dataTask:willCacheResponse:completionHandler:)](https://developer.apple.com/documentation/foundation/urlsessiondatadelegate/urlsession(_:datatask:willcacheresponse:completionhandler:))
+- [URLSessionTaskMetrics.ResourceFetchType](https://developer.apple.com/documentation/foundation/urlsessiontaskmetrics/resourcefetchtype)
 
 ### HTTP 标准与实战
 
