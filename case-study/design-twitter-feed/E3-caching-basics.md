@@ -114,6 +114,64 @@ Disk Cache 能在离线或弱网时立即响应，两者是互补关系，不是
 因为 Feed 对“立刻可看”的要求通常高于“毫秒级最新”。  
 先返回缓存再后台刷新，能把首屏等待降到最低。
 
+### Q4: L1 Memory Cache 需要考虑过期时间吗？
+
+需要，必须考虑。以 Kingfisher 为例：
+
+- `MemoryStorage` 的每个对象都带过期时间，默认是 `StorageExpiration.seconds(300)`（约 5 分钟）。
+- 读取时会先判断 `isExpired`，过期就当作不存在（等价于 miss）。
+- 命中后默认会执行 `extendExpiration(.cacheTime)`，把热点数据继续保活。
+- 另外还有定时清理（默认 `cleanInterval = 120` 秒）和系统内存告警清理（`didReceiveMemoryWarning` -> `clearMemoryCache`）。
+
+结论：L1 不是“只看命中不看时效”，而是“命中 + 未过期”才算有效命中。
+
+源码参考（Kingfisher）：
+
+- `Reference/Kingfisher-master/Sources/Cache/MemoryStorage.swift:47-52`  
+  说明内存缓存项都有过期时间，并有定时清理过期项。
+- `Reference/Kingfisher-master/Sources/Cache/MemoryStorage.swift:164-172`  
+  读取时检查 `isExpired`，过期返回 `nil`；命中后可延长过期时间。
+- `Reference/Kingfisher-master/Sources/Cache/MemoryStorage.swift:224-225`  
+  默认内存缓存过期时间是 `.seconds(300)`（5 分钟）。
+- `Reference/Kingfisher-master/Sources/Cache/MemoryStorage.swift:296-303`  
+  `extendExpiration` 机制：命中后延长过期时间（续期）。
+- `Reference/Kingfisher-master/Sources/Cache/ImageCache.swift:204-207`  
+  iOS 下监听 `didReceiveMemoryWarning`，触发 `clearMemoryCache`。
+
+### Q5: L2 Disk Cache 需要考虑过期时间吗？
+
+需要，同样必须考虑。以 Kingfisher 为例：
+
+- Disk 写入时会记录过期信息，不会把“已过期策略”的对象写入磁盘。
+- 读取时会先判断文件是否过期，过期直接返回 `nil`（等价于 miss）。
+- 命中后会根据策略更新过期时间（延长有效期）。
+- Disk 还会执行过期清理与容量清理（LRU），两者共同控制磁盘占用与数据新鲜度。
+
+结论：L2 不是“持久化就永不过期”，而是“持久化 + 过期控制 + 淘汰策略”。
+
+源码参考（Kingfisher）：
+
+- `Reference/Kingfisher-master/Sources/Cache/DiskStorage.swift:160-163`  
+  写入时应用 `expiration`，已过期策略不会入盘。
+- `Reference/Kingfisher-master/Sources/Cache/DiskStorage.swift:273-275`  
+  读取时判断 `meta.expired`，过期直接 miss。
+- `Reference/Kingfisher-master/Sources/Cache/DiskStorage.swift:282-283`  
+  命中后调用 `extendExpiration` 执行续期。
+- `Reference/Kingfisher-master/Sources/Cache/DiskStorage.swift:513-514`  
+  默认磁盘过期时间为 `.days(7)`。
+- `Reference/Kingfisher-master/Sources/Cache/DiskStorage.swift:414-441`  
+  提供 `removeExpiredValues` 清理过期文件。
+- `Reference/Kingfisher-master/Sources/Cache/DiskStorage.swift:447-480`  
+  超出容量时按 LRU 进行淘汰清理。
+
+### Q6: Cache-Aside（旁路缓存）是不是一般用于数据一致性要求中等的场景？
+
+是的，通常如此。
+
+- `Cache-Aside（旁路缓存）` 适合一致性要求中等的场景：允许短时间旧数据，重点是降低延迟与减少后端压力。
+- 对于高一致场景（如余额、支付、库存），默认应采用 `Network-First（网络优先）`，UI 展示 loading/skeleton 后请求网络。
+- 在高一致场景中，`Cache-Aside` 更适合作为回写缓存或失败兜底（`stale-if-error`），而不是默认读路径。
+
 ---
 ---
 
@@ -136,7 +194,8 @@ Disk Cache 能在离线或弱网时立即响应，两者是互补关系，不是
 ```text
 读取 Feed：
 UI -> Repository -> L1 Memory Cache
-  -> hit（命中）: 直接返回
+  -> hit（命中）且未过期: 直接返回
+  -> hit（命中）但已过期: 视为 miss（未命中），继续查 L2
   -> miss（未命中）: 查 L2 Disk Cache
       -> hit（命中）: 返回 UI，并回填 L1
       -> miss（未命中）或 expired（过期）: 请求 Network(API)
@@ -148,8 +207,10 @@ UI -> Repository -> L1 Memory Cache
 
 - Feed 首页：用 `Stale-While-Revalidate（SWR）`  
   先展示旧数据，后台拉新，刷新体验更平滑。
-- 余额/支付/库存：用 `Cache-Aside（旁路缓存）` 或直接网络优先  
-  以一致性优先，避免旧数据导致业务错误。
+- 余额/支付/库存（高一致场景）：默认 `Network-First（网络优先）`  
+  UI 展示 loading/skeleton（骨架屏）后走网络请求，避免展示旧数据。
+- `Cache-Aside（旁路缓存）` 在高一致场景可作为“回写缓存”或“失败兜底（stale-if-error）”，  
+  但不应作为默认读路径的数据来源。
 
 ### 3) `Cache-Control`、`ETag`、`Last-Modified` 各自作用
 
@@ -166,5 +227,5 @@ UI -> Repository -> L1 Memory Cache
 ### 面试 30 秒总结口条
 
 我会做 L1 `Memory Cache` + L2 `Disk Cache` 的分层读取，优先命中本地，未命中再请求网络。  
-Feed 用 `Stale-While-Revalidate（SWR）` 提升体感速度，强一致场景用 `Cache-Aside` 或网络优先。  
+Feed 用 `Stale-While-Revalidate（SWR）` 提升体感速度，强一致场景默认 `Network-First（网络优先）`。  
 HTTP 层用 `Cache-Control`、`ETag`、`Last-Modified` 控制缓存与重验证，并通过登出、下拉刷新、版本升级触发失效。
