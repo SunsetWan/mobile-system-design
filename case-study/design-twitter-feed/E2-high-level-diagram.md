@@ -109,6 +109,34 @@
 - ❌ 所有箭頭都指向同一個 ViewController（沒有分層）
 - ❌ 花 20 分鐘畫圖（時間管理失敗，擠壓 Deep Dive 時間）
 
+## ❓ E2 Q&A
+
+### Q: 為什麼 `Image Loader` 不放到 `Repository` 後面？
+
+**短答案**：因為圖片下載/解碼/快取屬於「媒體傳輸與渲染優化」，不是「業務資料來源協調」。
+
+**面試可用版本（30 秒）**：
+
+1. **職責分離（Separation of Concerns）**
+   - `Repository` 專注在 Feed/Tweet 等業務資料（JSON → Domain Model → Persistence）。
+   - `Image Loader` 專注在圖片生命週期（下載、解碼、Downsampling、Memory/Disk Cache）。
+
+2. **快取策略不同**
+   - `Repository` 常搭配 DB/SSOT 管理結構化資料一致性。
+   - 圖片快取更像 Kingfisher：以 `URL + processor` 當 key，重視 decode 成本、尺寸變體、淘汰策略（LRU）。
+
+3. **UI 效能需求不同**
+   - 圖片載入要綁 `cell reuse`、取消請求、prefetch、priority（滾動時非常關鍵）。
+   - 若硬塞進 `Repository`，容易讓資料層過重，且難以對齊 UI 細粒度優化。
+
+4. **跨場景重用**
+   - Avatar、Feed、Detail、Comment 都會用同一套圖片能力。
+   - 獨立成 `Image Loader`（像 Kingfisher）可被多個 flow 共用，不綁單一 `Repository`。
+
+**什麼情況可以讓 `Repository` 介入？**
+- 可以由 `Repository` 保存「圖片 metadata（URL、ETag、尺寸）」到本地，  
+  但實際圖片下載與快取仍建議交給 `Image Loader`。
+
 ---
 ---
 

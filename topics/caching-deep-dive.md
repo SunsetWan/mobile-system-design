@@ -26,7 +26,7 @@ Slower than memory, but persistent. Data survives app restarts.
 
 ## 3. Caching Strategies
 
-### Cache-Aside (Lazy Loading)
+### Cache-Aside (Lazy Loading, 简体中文：旁路缓存)
 The application code is responsible for loading data.
 1.  App asks Cache for data.
 2.  **Hit:** Cache returns data.
@@ -36,7 +36,7 @@ The application code is responsible for loading data.
 The application treats the cache as the main data source. The cache library handles the fetching logic.
 -   **Repositories:** In mobile architecture, the Repository pattern often acts as this layer.
 
-### Stale-While-Revalidate
+### Stale-While-Revalidate (简体中文：先返回旧数据并后台刷新)
 Return stale data immediately from the cache (for UI responsiveness) while simultaneously fetching fresh data from the network in the background to update the view.
 
 ## 4. Cache Eviction Policies

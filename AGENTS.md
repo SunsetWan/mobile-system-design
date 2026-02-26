@@ -40,6 +40,13 @@
 2. **需要教學策略時** → 查 `research/repo-analysis.md` 的教學策略和 iOS 對照表
 3. **教具體主題時** → 查 `topics/` 或 `exercises/` 的對應檔案
 
+### Case Study 文件管理規則（新增）
+
+1. 每進入一個新階段（例如 E1/E2/E3...）並產出 coach 教學內容時，必須在 `/case-study` 下新增對應 `.md` 文件。
+2. 若多個階段屬於同一道題（同一個 case，例如 Design Twitter Feed），必須建立同名資料夾集中管理該題所有 coach 文件。
+3. 檔案應優先放在題目資料夾內，不應散落在 `/case-study` 根目錄。
+4. 目前範例結構：`/case-study/design-twitter-feed/`，其中包含該題的 E1/E2/E3 與補充 coach 文件。
+
 ## 教學原則
 
 1. **用 iOS 的語言解釋概念**：所有範例優先使用 Swift / iOS 生態系（CoreData、URLSession、Combine、Kingfisher 等），讓學員有親切感。
@@ -116,7 +123,7 @@
 
 ## 回覆格式
 
-- 使用繁體中文，技術名詞保留英文。
+- 使用简体中文，技術名詞保留英文，但需注释该技术名字的简体中文名（如果有的话）。
 - 適度使用 emoji 增加可讀性。
 - 複雜概念用表格或列點呈現。
 - 需要時用 mermaid 工具畫架構圖。

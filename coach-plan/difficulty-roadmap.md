@@ -54,7 +54,7 @@
 | **前置知識** | 無 |
 | **為什麼 Easy** | 你已經用過 `NSCache`、`URLCache`，只是需要用系統設計語言重新描述 |
 | **iOS 連結** | `NSCache` = L1、`URLCache` = HTTP Cache、`FileManager` cacheDirectory = L2 |
-| **完成標準** | ✅ 能解釋 Cache-Aside vs Stale-While-Revalidate 的差異和適用場景 |
+| **完成標準** | ✅ 能解釋 Cache-Aside（旁路缓存）vs Stale-While-Revalidate（先返回旧数据并后台刷新） 的差異和適用場景 |
 | | ✅ 能說出 ETag / Cache-Control / Last-Modified 的作用 |
 | **關鍵 Trade-off** | Memory Cache 大 → 快但 OOM 風險；Disk Cache 大 → 慢但可離線 |
 
